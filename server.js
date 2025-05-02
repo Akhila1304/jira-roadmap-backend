@@ -1,6 +1,7 @@
 const express = require('express');
-const cors = require('cors');
 const axios = require('axios');
+const cors = require('cors');
+const cheerio = require('cheerio');
 require('dotenv').config();
 
 const app = express();
@@ -8,15 +9,15 @@ const PORT = process.env.PORT || 3001;
 
 app.use(cors());
 
-const email = process.env.JIRA_EMAIL;
-const apiToken = process.env.JIRA_API_TOKEN;
-const auth = Buffer.from(`${email}:${apiToken}`).toString('base64');
-
-// 1️⃣ Get fix versions
 app.get('/jira-versions', async (req, res) => {
-  const url = 'https://camascope.atlassian.net/rest/api/3/project/CR/versions';
+  const email = process.env.JIRA_EMAIL;
+  const apiToken = process.env.JIRA_API_TOKEN;
+  const jiraUrl = 'https://camascope.atlassian.net/rest/api/3/project/CR/versions';
+
+  const auth = Buffer.from(`${email}:${apiToken}`).toString('base64');
+
   try {
-    const response = await axios.get(url, {
+    const response = await axios.get(jiraUrl, {
       headers: {
         Authorization: `Basic ${auth}`,
         Accept: 'application/json',
@@ -24,114 +25,86 @@ app.get('/jira-versions', async (req, res) => {
     });
 
     const versions = response.data
-      .filter(v => v.name && v.name.includes('-'))
+      .filter(v => !v.released)
       .map(v => ({
+        id: v.id,
         name: v.name,
         releaseDate: v.releaseDate,
-        released: v.released,
-        id: v.id,
       }));
 
     res.json(versions);
   } catch (error) {
-    console.error('Error fetching versions:', error.message);
-    res.status(500).json({ error: 'Failed to fetch versions' });
+    console.error('Error fetching Jira versions:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Failed to fetch Jira versions' });
   }
 });
 
-// 2️⃣ Get statuses for a version (by versionId)
 app.get('/jira-statuses/:versionId', async (req, res) => {
   const versionId = req.params.versionId;
-  const url = `https://camascope.atlassian.net/rest/api/3/search?jql=fixVersion=${versionId}&fields=status`;
+  const releaseReportUrl = `https://camascope.atlassian.net/projects/CR/versions/${versionId}/tab/release-report-all-issues`;
 
   try {
-    const response = await axios.get(url, {
-      headers: {
-        Authorization: `Basic ${auth}`,
-        Accept: 'application/json',
-      },
-    });
-
-    const issues = response.data.issues;
+    const response = await axios.get(releaseReportUrl);
+    const $ = cheerio.load(response.data);
     const statusCounts = {};
 
-    for (const issue of issues) {
-      const statusName = issue.fields.status.name;
-      statusCounts[statusName] = (statusCounts[statusName] || 0) + 1;
-    }
+    $('.issuerow').each((_, element) => {
+      const status = $(element).find('.status span').attr('title');
+      if (status) {
+        statusCounts[status] = (statusCounts[status] || 0) + 1;
+      }
+    });
 
     res.json(statusCounts);
   } catch (error) {
-    console.error(`Error fetching statuses for version ${versionId}:`, error.message);
-    res.status(500).json({ error: 'Failed to fetch statuses' });
+    console.error('Error scraping status data:', error.message);
+    res.status(500).json({ error: 'Failed to fetch Jira status data' });
   }
 });
 
-// 3️⃣ Program-level progress (grouped by fixVersion prefix)
-app.get('/jira-program-progress', async (req, res) => {
-  const versionsUrl = 'https://camascope.atlassian.net/rest/api/3/project/CR/versions';
+app.get('/jira-programs-progress', async (req, res) => {
+  const email = process.env.JIRA_EMAIL;
+  const apiToken = process.env.JIRA_API_TOKEN;
+  const jiraUrl = 'https://camascope.atlassian.net/rest/api/3/project/CR/versions';
+  const auth = Buffer.from(`${email}:${apiToken}`).toString('base64');
 
   try {
-    const versionsResponse = await axios.get(versionsUrl, {
+    const response = await axios.get(jiraUrl, {
       headers: {
         Authorization: `Basic ${auth}`,
         Accept: 'application/json',
       },
     });
 
-    const versions = versionsResponse.data.filter(
-      v => !v.released && v.id && v.name.includes('-')
-    );
+    const filteredVersions = response.data.filter(v => !v.released);
 
-    const programStats = {};
+    const programs = {};
 
-    for (const version of versions) {
-      const versionId = version.id;
-      const program = version.name.split('-')[0];
+    filteredVersions.forEach(v => {
+      let category = 'others';
+      if (v.name.startsWith('emar')) category = 'EMAR';
+      else if (v.name.startsWith('mobile')) category = 'Mobile';
+      else if (v.name.startsWith('sprt')) category = 'Support Tool';
+      else if (v.name.startsWith('pprt')) category = 'Pharmacy Portal';
 
-      const issuesUrl = `https://camascope.atlassian.net/rest/api/3/search?jql=fixVersion=${versionId}&fields=status`;
+      if (!programs[category]) {
+        programs[category] = [];
+      }
 
-      const issuesResponse = await axios.get(issuesUrl, {
-        headers: {
-          Authorization: `Basic ${auth}`,
-          Accept: 'application/json',
-        },
+      programs[category].push({
+        name: v.name,
+        releaseDate: v.releaseDate,
       });
+    });
 
-      const issues = issuesResponse.data.issues;
-
-      if (!programStats[program]) {
-        programStats[program] = { done: 0, inProgress: 0, todo: 0, total: 0 };
-      }
-
-      for (const issue of issues) {
-        const status = issue.fields.status.name;
-        programStats[program].total += 1;
-
-        if (status.toLowerCase().includes('done')) {
-          programStats[program].done += 1;
-        } else if (status.toLowerCase().includes('progress')) {
-          programStats[program].inProgress += 1;
-        } else {
-          programStats[program].todo += 1;
-        }
-      }
-    }
-
-    const result = Object.entries(programStats).map(([program, stats]) => ({
-      program,
-      ...stats,
-      completionPercent: ((stats.done / stats.total) * 100).toFixed(1),
-    }));
-
-    res.json(result);
+    res.json(programs);
   } catch (error) {
-    console.error('Error fetching program progress:', error.message);
-    res.status(500).json({ error: 'Failed to fetch program progress' });
+    console.error('Error fetching Jira programs:', error.message);
+    res.status(500).json({ error: 'Failed to fetch Jira programs' });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`✅ Server running on http://localhost:${PORT}`);
 });
 
