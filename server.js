@@ -25,7 +25,7 @@ app.get('/jira-versions', async (req, res) => {
     });
 
     const versions = response.data
-      .filter(v => !v.released)
+      .filter(v => !v.released && !v.archived)
       .map(v => ({
         id: v.id,
         name: v.name,
