@@ -9,6 +9,7 @@ const PORT = process.env.PORT || 3001;
 
 app.use(cors());
 
+// 🟢 Endpoint: Fetch unreleased and unarchived Jira versions
 app.get('/jira-versions', async (req, res) => {
   const email = process.env.JIRA_EMAIL;
   const apiToken = process.env.JIRA_API_TOKEN;
@@ -39,29 +40,40 @@ app.get('/jira-versions', async (req, res) => {
   }
 });
 
+// 🟡 Endpoint: Fetch issue statuses from a Jira version's release report
 app.get('/jira-statuses/:versionId', async (req, res) => {
   const versionId = req.params.versionId;
-  const releaseReportUrl = `https://camascope.atlassian.net/projects/CR/versions/${versionId}/tab/release-report-all-issues`;
+  const email = process.env.JIRA_EMAIL;
+  const apiToken = process.env.JIRA_API_TOKEN;
+
+  const auth = Buffer.from(`${email}:${apiToken}`).toString('base64');
+  const jql = `fixVersion = ${versionId}`;
+  const jiraSearchUrl = `https://camascope.atlassian.net/rest/api/3/search?jql=${encodeURIComponent(jql)}&fields=status&maxResults=1000`;
 
   try {
-    const response = await axios.get(releaseReportUrl);
-    const $ = cheerio.load(response.data);
-    const statusCounts = {};
+    const response = await axios.get(jiraSearchUrl, {
+      headers: {
+        Authorization: `Basic ${auth}`,
+        Accept: 'application/json',
+      },
+    });
 
-    $('.issuerow').each((_, element) => {
-      const status = $(element).find('.status span').attr('title');
-      if (status) {
-        statusCounts[status] = (statusCounts[status] || 0) + 1;
-      }
+    const statusCounts = {};
+    const issues = response.data.issues;
+
+    issues.forEach(issue => {
+      const status = issue.fields.status.name;
+      statusCounts[status] = (statusCounts[status] || 0) + 1;
     });
 
     res.json(statusCounts);
   } catch (error) {
-    console.error('Error scraping status data:', error.message);
-    res.status(500).json({ error: 'Failed to fetch Jira status data' });
+    console.error('Error fetching issue statuses:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Failed to fetch issue statuses' });
   }
 });
 
+// 🔵 Endpoint: Group unreleased fix versions by program category
 app.get('/jira-programs-progress', async (req, res) => {
   const email = process.env.JIRA_EMAIL;
   const apiToken = process.env.JIRA_API_TOKEN;
@@ -77,15 +89,14 @@ app.get('/jira-programs-progress', async (req, res) => {
     });
 
     const filteredVersions = response.data.filter(v => !v.released);
-
     const programs = {};
 
     filteredVersions.forEach(v => {
-      let category = 'others';
-      if (v.name.startsWith('emar')) category = 'EMAR';
-      else if (v.name.startsWith('mobile')) category = 'Mobile';
-      else if (v.name.startsWith('sprt')) category = 'Support Tool';
-      else if (v.name.startsWith('pprt')) category = 'Pharmacy Portal';
+      let category = 'Others';
+      if (v.name.toLowerCase().startsWith('emar')) category = 'EMAR';
+      else if (v.name.toLowerCase().startsWith('mobile')) category = 'Mobile';
+      else if (v.name.toLowerCase().startsWith('sprt')) category = 'Support Tool';
+      else if (v.name.toLowerCase().startsWith('pprt')) category = 'Pharmacy Portal';
 
       if (!programs[category]) {
         programs[category] = [];
@@ -104,7 +115,7 @@ app.get('/jira-programs-progress', async (req, res) => {
   }
 });
 
+// 🚀 Start the server
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
 });
-
