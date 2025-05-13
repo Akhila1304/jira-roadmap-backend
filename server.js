@@ -1,28 +1,99 @@
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
-const cheerio = require('cheerio');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
 app.use(cors());
+app.use(express.json());
 
-// 🟢 Endpoint: Fetch unreleased and unarchived Jira versions
-app.get('/jira-versions', async (req, res) => {
-  const email = process.env.JIRA_EMAIL;
-  const apiToken = process.env.JIRA_API_TOKEN;
-  const jiraUrl = 'https://camascope.atlassian.net/rest/api/3/project/CR/versions';
+const JIRA_BASE_URL = 'https://camascope.atlassian.net';
+const JIRA_EMAIL = process.env.JIRA_EMAIL;
+const JIRA_API_TOKEN = process.env.JIRA_API_TOKEN;
+const STORY_POINT_FIELD = 'customfield_10400';
 
-  const auth = Buffer.from(`${email}:${apiToken}`).toString('base64');
+const JIRA_HEADERS = {
+  'Authorization': `Basic ${Buffer.from(`${JIRA_EMAIL}:${JIRA_API_TOKEN}`).toString('base64')}`,
+  'Accept': 'application/json'
+};
+
+// ✅ Health Check
+app.get('/', (req, res) => {
+  res.json({ message: 'Jira Dashboard Backend is Running' });
+});
+
+// 📊 Velocity Trend (with filtering by sprint name prefix)
+app.get('/velocity-trend/:boardId', async (req, res) => {
+  const { boardId } = req.params;
+  const maxSprints = 20; // Fetch more to allow filtering
+
+  const boardSprintPrefixes = {
+    '102': 'emar',
+    '357': 'pharm',
+    '324': 'sprt',
+  };
+
+  const expectedPrefix = boardSprintPrefixes[boardId];
 
   try {
-    const response = await axios.get(jiraUrl, {
-      headers: {
-        Authorization: `Basic ${auth}`,
-        Accept: 'application/json',
+    const sprintsResp = await axios.get(`${JIRA_BASE_URL}/rest/agile/1.0/board/${boardId}/sprint`, {
+      headers: JIRA_HEADERS,
+      params: {
+        state: 'closed',
+        maxResults: maxSprints,
       },
+    });
+
+    const allSprints = sprintsResp.data.values;
+
+    const filteredSprints = allSprints
+      .filter(sprint => sprint.name.toLowerCase().startsWith(expectedPrefix))
+      .slice(-6) // Last 6 relevant sprints
+      .reverse(); // Most recent first
+
+    const trend = [];
+
+    for (const sprint of filteredSprints) {
+      const sprintId = sprint.id;
+      const sprintName = sprint.name;
+
+      const issuesResp = await axios.get(`${JIRA_BASE_URL}/rest/agile/1.0/sprint/${sprintId}/issue`, {
+        headers: JIRA_HEADERS,
+        params: {
+          fields: `${STORY_POINT_FIELD},status`
+        }
+      });
+
+      const issues = issuesResp.data.issues;
+
+      const committedPoints = issues.reduce((sum, issue) => {
+        const sp = issue.fields[STORY_POINT_FIELD];
+        return sum + (typeof sp === 'number' ? sp : 0);
+      }, 0);
+
+      const completedPoints = issues.reduce((sum, issue) => {
+        const sp = issue.fields[STORY_POINT_FIELD];
+        const isDone = issue.fields.status?.statusCategory?.key === 'done';
+        return sum + (isDone && typeof sp === 'number' ? sp : 0);
+      }, 0);
+
+      trend.push({ sprintName, committedPoints, completedPoints });
+    }
+
+    res.json(trend);
+  } catch (error) {
+    console.error('Error fetching velocity trend:', error.message);
+    res.status(500).json({ error: 'Failed to fetch velocity trend' });
+  }
+});
+
+// 🟢 Unreleased versions
+app.get('/jira-versions', async (req, res) => {
+  try {
+    const response = await axios.get(`${JIRA_BASE_URL}/rest/api/3/project/CR/versions`, {
+      headers: JIRA_HEADERS,
     });
 
     const versions = response.data
@@ -40,22 +111,16 @@ app.get('/jira-versions', async (req, res) => {
   }
 });
 
-// 🟡 Endpoint: Fetch issue statuses from a Jira version's release report
+// 🟡 Status breakdown for a version
 app.get('/jira-statuses/:versionId', async (req, res) => {
   const versionId = req.params.versionId;
-  const email = process.env.JIRA_EMAIL;
-  const apiToken = process.env.JIRA_API_TOKEN;
-
-  const auth = Buffer.from(`${email}:${apiToken}`).toString('base64');
-  const jql = `fixVersion = ${versionId}`;
-  const jiraSearchUrl = `https://camascope.atlassian.net/rest/api/3/search?jql=${encodeURIComponent(jql)}&fields=status&maxResults=1000`;
 
   try {
-    const response = await axios.get(jiraSearchUrl, {
-      headers: {
-        Authorization: `Basic ${auth}`,
-        Accept: 'application/json',
-      },
+    const jql = `fixVersion = ${versionId}`;
+    const searchUrl = `${JIRA_BASE_URL}/rest/api/3/search?jql=${encodeURIComponent(jql)}&fields=status&maxResults=1000`;
+
+    const response = await axios.get(searchUrl, {
+      headers: JIRA_HEADERS
     });
 
     const statusCounts = {};
@@ -73,19 +138,11 @@ app.get('/jira-statuses/:versionId', async (req, res) => {
   }
 });
 
-// 🔵 Endpoint: Group unreleased fix versions by program category
+// 🔵 Program progress
 app.get('/jira-programs-progress', async (req, res) => {
-  const email = process.env.JIRA_EMAIL;
-  const apiToken = process.env.JIRA_API_TOKEN;
-  const jiraUrl = 'https://camascope.atlassian.net/rest/api/3/project/CR/versions';
-  const auth = Buffer.from(`${email}:${apiToken}`).toString('base64');
-
   try {
-    const response = await axios.get(jiraUrl, {
-      headers: {
-        Authorization: `Basic ${auth}`,
-        Accept: 'application/json',
-      },
+    const response = await axios.get(`${JIRA_BASE_URL}/rest/api/3/project/CR/versions`, {
+      headers: JIRA_HEADERS
     });
 
     const filteredVersions = response.data.filter(v => !v.released);
@@ -93,14 +150,13 @@ app.get('/jira-programs-progress', async (req, res) => {
 
     filteredVersions.forEach(v => {
       let category = 'Others';
-      if (v.name.toLowerCase().startsWith('emar')) category = 'EMAR';
-      else if (v.name.toLowerCase().startsWith('mobile')) category = 'Mobile';
-      else if (v.name.toLowerCase().startsWith('sprt')) category = 'Support Tool';
-      else if (v.name.toLowerCase().startsWith('pprt')) category = 'Pharmacy Portal';
+      const name = v.name.toLowerCase();
+      if (name.startsWith('emar')) category = 'EMAR';
+      else if (name.startsWith('mobile')) category = 'Mobile';
+      else if (name.startsWith('sprt')) category = 'Support Tool';
+      else if (name.startsWith('pprt')) category = 'Pharmacy Portal';
 
-      if (!programs[category]) {
-        programs[category] = [];
-      }
+      if (!programs[category]) programs[category] = [];
 
       programs[category].push({
         name: v.name,
@@ -115,7 +171,7 @@ app.get('/jira-programs-progress', async (req, res) => {
   }
 });
 
-// 🚀 Start the server
+// 🚀 Start server
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
 });
