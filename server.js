@@ -9,10 +9,17 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
-const JIRA_BASE_URL = 'https://camascope.atlassian.net';
+// 🔐 Jira Auth & Config
+const CLOUD_ID = process.env.CLOUD_ID;
+const JIRA_BASE_URL = `https://api.atlassian.com/ex/jira/${CLOUD_ID}`;
 const JIRA_EMAIL = process.env.JIRA_EMAIL;
 const JIRA_API_TOKEN = process.env.JIRA_API_TOKEN;
 const STORY_POINT_FIELD = 'customfield_10400';
+
+if (!JIRA_EMAIL || !JIRA_API_TOKEN || !CLOUD_ID) {
+  console.error('❌ Missing JIRA_EMAIL, JIRA_API_TOKEN or CLOUD_ID in .env');
+  process.exit(1);
+}
 
 const JIRA_HEADERS = {
   'Authorization': `Basic ${Buffer.from(`${JIRA_EMAIL}:${JIRA_API_TOKEN}`).toString('base64')}`,
@@ -24,10 +31,10 @@ app.get('/', (req, res) => {
   res.json({ message: 'Jira Dashboard Backend is Running' });
 });
 
-// 📊 Velocity Trend (with filtering by sprint name prefix)
+// 📊 Velocity Trend (based on recent sprints with prefix filter)
 app.get('/velocity-trend/:boardId', async (req, res) => {
   const { boardId } = req.params;
-  const maxSprints = 20; // Fetch more to allow filtering
+  const maxSprints = 20;
 
   const boardSprintPrefixes = {
     '102': 'emar',
@@ -50,8 +57,8 @@ app.get('/velocity-trend/:boardId', async (req, res) => {
 
     const filteredSprints = allSprints
       .filter(sprint => sprint.name.toLowerCase().startsWith(expectedPrefix))
-      .slice(-6) // Last 6 relevant sprints
-      .reverse(); // Most recent first
+      .slice(-6)
+      .reverse();
 
     const trend = [];
 
@@ -84,7 +91,7 @@ app.get('/velocity-trend/:boardId', async (req, res) => {
 
     res.json(trend);
   } catch (error) {
-    console.error('Error fetching velocity trend:', error.message);
+    console.error('❌ Error fetching velocity trend:', error.response?.data || error.message);
     res.status(500).json({ error: 'Failed to fetch velocity trend' });
   }
 });
@@ -106,7 +113,7 @@ app.get('/jira-versions', async (req, res) => {
 
     res.json(versions);
   } catch (error) {
-    console.error('Error fetching Jira versions:', error.response?.data || error.message);
+    console.error('❌ Error fetching Jira versions:', error.response?.data || error.message);
     res.status(500).json({ error: 'Failed to fetch Jira versions' });
   }
 });
@@ -133,12 +140,12 @@ app.get('/jira-statuses/:versionId', async (req, res) => {
 
     res.json(statusCounts);
   } catch (error) {
-    console.error('Error fetching issue statuses:', error.response?.data || error.message);
+    console.error('❌ Error fetching issue statuses:', error.response?.data || error.message);
     res.status(500).json({ error: 'Failed to fetch issue statuses' });
   }
 });
 
-// 🔵 Program progress
+// 🔵 Program progress based on version names
 app.get('/jira-programs-progress', async (req, res) => {
   try {
     const response = await axios.get(`${JIRA_BASE_URL}/rest/api/3/project/CR/versions`, {
@@ -166,12 +173,12 @@ app.get('/jira-programs-progress', async (req, res) => {
 
     res.json(programs);
   } catch (error) {
-    console.error('Error fetching Jira programs:', error.message);
+    console.error('❌ Error fetching Jira programs:', error.message);
     res.status(500).json({ error: 'Failed to fetch Jira programs' });
   }
 });
 
-// 🚀 Start server
+// 🚀 Start Server
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
 });
